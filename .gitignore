@@ -5,8 +5,11 @@ build/
 !**/src/main/**/build/
 !**/src/test/**/build/
 
+<<<<<<< HEAD
 migrations
 
+=======
+>>>>>>> 3dd85c4 (feat: init)
 ### STS ###
 .apt_generated
 .classpath

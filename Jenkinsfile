@@ -1,138 +1,203 @@
 // Jenkinsfile
-// -------------------------------
-// Jalankan pada Jenkins agent apa pun yang memiliki 'oc' CLI
-// Pastikan Jenkins memiliki akses ke cluster (service‑account di dalam cluster
-//   atau oc login --token=… untuk agent di luar cluster).
+// -----------------------------------------------------------------------------
+// • Build Spring/Gradle project ➜ menghasilkan JAR
+// • Trigger/kelola BuildConfig & ImageStream ➜ tag 'latest' + SEMANTIC_VERSION
+// • Apply manifest OpenShift ➜ rahasia, service, deployment, dsb.
+// • Set image ke deployment & rollout
+//
+// Asumsi: Jenkins agent punya 'oc' CLI & kredensial login ke cluster.
+//
 
 pipeline {
     agent any
 
-    environment {
-        // Ganti keduanya sesuai cluster Anda
-        OPENSHIFT_PROJECT = 'payment-service1'     // namespace / project
-        APP_NAME          = 'payment-service'       // nama app, buildconfig, imagestream, dsb.
+    /*--- PARAMETERS ---------------------------------------------------------*/
+    // Anda bisa mendorong versi semver via parameter; default memakai BUILD_NUMBER
+    parameters {
+        string(
+            name: 'SEMANTIC_VERSION',
+            defaultValue: '',
+            description: 'Tag semver untuk image (contoh 1.0.3). Kosongkan untuk pakai BUILD_NUMBER.'
+        )
     }
 
-    stages {
+    /*--- ENVIRONMENT --------------------------------------------------------*/
+    environment {
+        // Ganti sesuai cluster
+        NAMESPACE = 'payment-service1'            // project / namespace OpenShift
+        APP_NAME  = 'payment-service'             // nama BuildConfig & Deployment
+        // alamat registry internal OpenShift (ubah bila beda)
+        REGISTRY  = "image-registry.openshift-image-registry.svc:5000"
+        // Hitung SEMVER: pakai param jika ada, else fallback ke BUILD_NUMBER
+        SEMANTIC_VERSION = "${ (params.SEMANTIC_VERSION ?: env.BUILD_NUMBER) }"
+    }
 
-        // -----------------------------------------------------------------
+    /*--- STAGES -------------------------------------------------------------*/
+    stages {
+        // ---------------------------------------------------------------------
         stage('Checkout') {
             steps {
-                echo 'Checking out source code…'
-                checkout scm                        // pull repo yang berisi Dockerfile, src, Jenkinsfile
+                echo '📥  Checking out source code…'
+                checkout scm
             }
         }
 
-        // -----------------------------------------------------------------
+        // ---------------------------------------------------------------------
         stage('Build & Test') {
             steps {
-                echo 'Building application & running tests…'
+                echo '🔨  Building application & running tests…'
                 script {
                     sh 'chmod +x ./gradlew'
-                    sh './gradlew clean build'      // menghasilkan JAR di build/libs/…
+                    sh './gradlew clean build'    // JAR di build/libs/…
                 }
             }
         }
 
-        // -----------------------------------------------------------------
-        stage('Ensure BuildConfig') {
+        // ---------------------------------------------------------------------
+        stage('Build with OpenShift BuildConfig') {
             steps {
                 script {
-                    echo 'Checking BuildConfig…'
-                    def bcExists = sh(
-                        script: "oc get bc ${APP_NAME} -n ${OPENSHIFT_PROJECT} --ignore-not-found",
-                        returnStatus: true
-                    ) == 0
+                    echo "🚀  Triggering OpenShift build for ${APP_NAME}:${SEMANTIC_VERSION}"
 
-                    if (!bcExists) {
-                        echo "BuildConfig ${APP_NAME} not found – creating it."
-                        sh """
-                           oc new-build --name=${APP_NAME}          \
-                                        --binary=true               \
-                                        --strategy=docker           \
-                                        --to=${APP_NAME}:latest     \
-                                        -n ${OPENSHIFT_PROJECT}
-                        """
-                    } else {
-                        echo "BuildConfig ${APP_NAME} already exists."
-                    }
+                    sh """
+                        # Berpindah project
+                        oc project ${NAMESPACE}
+
+                        ################################################################
+                        # 1) Buat / update BuildConfig
+                        ################################################################
+                        oc apply -f - <<EOF
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: ${APP_NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    app: ${APP_NAME}
+spec:
+  source:
+    type: Binary                          # kita upload konteks repo (Dockerfile + JAR)
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Dockerfile
+  output:
+    to:
+      kind: ImageStreamTag
+      name: ${APP_NAME}:latest
+  triggers:                               # manual trigger saja
+  - type: Manual
+  runPolicy: Serial
+EOF
+
+                        ################################################################
+                        # 2) Buat / update ImageStream
+                        ################################################################
+                        oc apply -f - <<EOF
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: ${APP_NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    app: ${APP_NAME}
+spec:
+  lookupPolicy:
+    local: false
+EOF
+
+                        ################################################################
+                        # 3) Start build: upload seluruh repo sebagai binary input
+                        ################################################################
+                        echo "⏳  Starting OpenShift build…"
+                        oc start-build ${APP_NAME} --from-dir=. --wait --follow | cat
+
+                        ################################################################
+                        # 4) Tag hasil build dengan semantic version
+                        ################################################################
+                        oc tag ${APP_NAME}:latest ${APP_NAME}:${SEMANTIC_VERSION}
+
+                        echo "✅  Build completed -> tags: latest & ${SEMANTIC_VERSION}"
+                    """
                 }
             }
         }
 
-        // -----------------------------------------------------------------
-        stage('Build OpenShift Image') {
+        // ---------------------------------------------------------------------
+        stage('Apply OpenShift Resources') {
             steps {
                 script {
-                    echo "Building container image in OpenShift…"
-                    // upload entire repo (Dockerfile + artefak JAR) sebagai binary build:
-                    sh "oc start-build ${APP_NAME} --from-dir=. --follow -n ${OPENSHIFT_PROJECT}"
+                    echo '📜  Applying resource manifests…'
+                    sh """
+                        oc project ${NAMESPACE}
+
+                        # Terapkan YAML di folder openshift/ (contoh: secrets, service, deployment)
+                        oc apply -f openshift/secrets.yaml
+                        oc apply -f openshift/service.yaml
+                        oc apply -f openshift/deployment.yaml
+
+                        echo '✅  Resources applied.'
+                    """
                 }
             }
         }
 
-        // -----------------------------------------------------------------
-        stage('Deploy to OpenShift') {
+        // ---------------------------------------------------------------------
+        stage('Deploy Application') {
             steps {
                 script {
-                    echo "Ensuring Deployment exists…"
-                    def deployExists = sh(
-                        script: "oc get deployment ${APP_NAME} -n ${OPENSHIFT_PROJECT} --ignore-not-found",
-                        returnStatus: true
-                    ) == 0
+                    echo "🚢  Deploying ${APP_NAME} image…"
 
-                    if (!deployExists) {
-                        // Buat Deployment + Service baru dari ImageStream hasil build
-                        sh """
-                           oc new-app --image-stream=${OPENSHIFT_PROJECT}/${APP_NAME}:latest \
-                                      --name=${APP_NAME}                                   \
-                                      -n ${OPENSHIFT_PROJECT}
-                        """
-                    } else {
-                        // Trigger rollout untuk image terbaru
-                        sh "oc rollout latest deployment/${APP_NAME} -n ${OPENSHIFT_PROJECT}"
-                    }
+                    sh """
+                        oc project ${NAMESPACE}
 
-                    echo "Waiting for rollout to finish…"
-                    sh "oc rollout status deployment/${APP_NAME} -n ${OPENSHIFT_PROJECT}"
-                }
-            }
-        }
+                        # Ganti image container pada Deployment ke tag 'latest'
+                        oc set image deployment/${APP_NAME} ${APP_NAME}=${REGISTRY}/${NAMESPACE}/${APP_NAME}:latest -n ${NAMESPACE}
 
-        // -----------------------------------------------------------------
-        stage('Expose Service') {
-            steps {
-                script {
-                    echo "Exposing service as Route…"
-                    def routeExists = sh(
-                        script: "oc get route ${APP_NAME} -n ${OPENSHIFT_PROJECT} --ignore-not-found",
-                        returnStatus: true
-                    ) == 0
+                        # Restart (rollout) deployment supaya pod baru tarik image
+                        oc rollout restart deployment/${APP_NAME} -n ${NAMESPACE}
 
-                    if (!routeExists) {
-                        sh "oc expose service/${APP_NAME} --name=${APP_NAME} -n ${OPENSHIFT_PROJECT}"
-                        echo "Route created."
-                    } else {
-                        echo "Route already exists."
-                    }
+                        # Tunggu rollout selesai (max 5 menit)
+                        oc rollout status deployment/${APP_NAME} -n ${NAMESPACE} --timeout=300s | cat
 
-                    // Ambil host dan tampilkan
-                    def host = sh(
-                        script: "oc get route ${APP_NAME} -n ${OPENSHIFT_PROJECT} -o jsonpath='{.spec.host}'",
-                        returnStdout: true
-                    ).trim()
-                    echo "✅ Application is available at: http://${host}"
+                        # Tampilkan status pod & image
+                        echo ''
+                        oc get pods -l app=${APP_NAME} -n ${NAMESPACE}
+                        echo ''
+                        echo 'Current deployment image:'
+                        oc get deployment ${APP_NAME} -o jsonpath='{.spec.template.spec.containers[0].image}' -n ${NAMESPACE}
+                        echo ''
+                        echo '✅  Deployed tags: latest & ${SEMANTIC_VERSION}'
+                        echo '🔍  ImageStream tags available:'
+                        oc get imagestream ${APP_NAME} -o jsonpath='{.status.tags[*].tag}' -n ${NAMESPACE} | tr ' ' '\\n'
+                    """
                 }
             }
         }
     }
 
-    // ---------------------------------------------------------------------
+    /*--- POST ----------------------------------------------------------------*/
     post {
-        always {
-            echo 'Pipeline finished.'
-            // Batalkan build state NEW/ PENDING agar tak numpuk (abaikan error jika BC belum ada)
-            sh "oc cancel-build bc/${APP_NAME} --state=new -n ${OPENSHIFT_PROJECT} || true"
+        success {
+            echo """
+🎉  Pipeline SUCCESS
+    • Image tags  : latest, ${SEMANTIC_VERSION}
+    • Namespace   : ${NAMESPACE}
+    • Deployment  : ${APP_NAME}
+
+Untuk port‑forward lokal:
+    oc port-forward svc/${APP_NAME} 8080:8080 -n ${NAMESPACE}
+"""
+        }
+        failure {
+            script {
+                echo '❌  Pipeline FAILED – lihat log di atas.'
+                // try dumping last build logs (abaikan error jika tidak ada build)
+                sh """
+                    echo '─── Recent Build Logs (if any) ───'
+                    oc logs -l build=${APP_NAME} --tail=50 -n ${NAMESPACE} || true
+                """
+            }
         }
     }
 }

@@ -191,7 +191,7 @@ Untuk port‑forward lokal:
         }
         failure {
             script {
-                echo '❌  Pipeline FAILED – lihat log di atas.'
+                echo '❌  Pipeline FAILED  lihat log di atas.'
                 // try dumping last build logs (abaikan error jika tidak ada build)
                 sh """
                     echo '─── Recent Build Logs (if any) ───'

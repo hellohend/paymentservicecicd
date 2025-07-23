@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-service
+  namespace: payment-service1
+  labels:
+    app: payment-service
+spec:
+  selector:
+    app: payment-service                 # harus cocok dengan Deployment template.labels
+  ports:
+    - name: http
+      port: 8080                         # port di cluster
+      targetPort: 8080                   # port di container
+      protocol: TCP
+  type: ClusterIP                        # biarkan ClusterIP; Route/Ingress akan expose

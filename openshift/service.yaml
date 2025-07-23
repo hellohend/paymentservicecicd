@@ -7,10 +7,10 @@ metadata:
     app: payment-service
 spec:
   selector:
-    app: payment-service                 # harus cocok dengan Deployment template.labels
+    app: payment-service
   ports:
     - name: http
-      port: 8080                         # port di cluster
-      targetPort: 8080                   # port di container
+      port: 8080
+      targetPort: 8080
       protocol: TCP
-  type: ClusterIP                        # biarkan ClusterIP; Route/Ingress akan expose
+  type: ClusterIP

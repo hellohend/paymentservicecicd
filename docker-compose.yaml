@@ -28,18 +28,18 @@ services:
     command: |
       -url=jdbc:postgresql://one-gate-payment-db:5432/one_gate_payment -user=developer -password=developer123 migrate
 
-  authentication-one-gate-payment:
-    container_name: authentication-one-gate-payment
-    restart: always
-    depends_on:
-      - one-gate-payment-db
-      - flyway
-    environment:
-      PROFILE_MODE: local
-      SERVER_PORT: 8081
-    ports:
-      - "8081:8081"
-    image: "authentication-one-gate-payment:latest"
+  # authentication-one-gate-payment:
+  #   container_name: authentication-one-gate-payment
+  #   restart: always
+  #   depends_on:
+  #     - one-gate-payment-db
+  #     - flyway
+  #   environment:
+  #     PROFILE_MODE: local
+  #     SERVER_PORT: 8081
+  #   ports:
+  #     - "8081:8081"
+  #   image: "authentication-one-gate-payment:latest"
 
   payment-one-gate-payment:
     container_name: payment-one-gate-payment
@@ -47,7 +47,6 @@ services:
     depends_on:
       - one-gate-payment-db
       - flyway
-      - authentication-one-gate-payment
     environment:
       PROFILE_MODE: local
       SERVER_PORT: 8082

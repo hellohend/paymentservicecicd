@@ -18,29 +18,45 @@ spec:
       containers:
         - name: payment-service
           image: image-registry.openshift-image-registry.svc:5000/payment-service1/payment-service:latest
-          imagePullPolicy: Always          # pastikan pod selalu tarik versi terbaru
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
-              name: http
-          envFrom:
-            - secretRef:
-                name: payment-service-secret
+          env:
+            - name: DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: payment-service-secret
+                  key: DB_USERNAME
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: payment-service-secret
+                  key: DB_PASSWORD
+            - name: DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: payment-service-secret
+                  key: DB_URL
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: payment-service-secret
+                  key: JWT_SECRET
           readinessProbe:
             httpGet:
-              path: /actuator/health/readiness
+              path: /actuator/health
               port: 8080
             initialDelaySeconds: 10
-            periodSeconds: 15
+            periodSeconds: 10
           livenessProbe:
             httpGet:
-              path: /actuator/health/liveness
+              path: /actuator/health
               port: 8080
             initialDelaySeconds: 30
-            periodSeconds: 30
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "256Mi"
-            limits:
-              cpu: "500m"
-              memory: "512Mi"
+            periodSeconds: 10
+      restartPolicy: Always
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 25%
+      maxSurge: 25%

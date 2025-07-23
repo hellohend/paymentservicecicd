@@ -1,200 +1,208 @@
-// Jenkinsfile
-// -----------------------------------------------------------------------------
-// • Build Spring/Gradle project ➜ menghasilkan JAR
-// • Trigger/kelola BuildConfig & ImageStream ➜ tag 'latest' + SEMANTIC_VERSION
-// • Apply manifest OpenShift ➜ rahasia, service, deployment, dsb.
-// • Set image ke deployment & rollout
-//
-// Asumsi: Jenkins agent punya 'oc' CLI & kredensial login ke cluster.
-//
-
+// Jenkinsfile -----------------------------------------------------------------
 pipeline {
     agent any
 
-    /*--- PARAMETERS ---------------------------------------------------------*/
-    // Anda bisa mendorong versi semver via parameter; default memakai BUILD_NUMBER
+    /* PARAMETERS ----------------------------------------------------------- */
     parameters {
-        string(
-            name: 'SEMANTIC_VERSION',
-            defaultValue: '',
-            description: 'Tag semver untuk image (contoh 1.0.3). Kosongkan untuk pakai BUILD_NUMBER.'
-        )
+        string(name: 'SEMANTIC_VERSION',
+               defaultValue: '',
+               description: 'Tag semver (mis. 1.0.3). Kosong = BUILD_NUMBER')
     }
 
-    /*--- ENVIRONMENT --------------------------------------------------------*/
+    /* ENV ------------------------------------------------------------------ */
     environment {
-        // Ganti sesuai cluster
-        NAMESPACE = 'payment-service1'            // project / namespace OpenShift
-        APP_NAME  = 'payment-service'             // nama BuildConfig & Deployment
-        // alamat registry internal OpenShift (ubah bila beda)
-        REGISTRY  = "image-registry.openshift-image-registry.svc:5000"
-        // Hitung SEMVER: pakai param jika ada, else fallback ke BUILD_NUMBER
-        SEMANTIC_VERSION = "${ (params.SEMANTIC_VERSION ?: env.BUILD_NUMBER) }"
+        NAMESPACE         = 'payment-service1'
+        APP_NAME          = 'payment-service'
+        REGISTRY          = 'image-registry.openshift-image-registry.svc:5000'
+        SEMANTIC_VERSION  = "${params.SEMANTIC_VERSION ?: env.BUILD_NUMBER}"
     }
 
-    /*--- STAGES -------------------------------------------------------------*/
+    /* STAGES --------------------------------------------------------------- */
     stages {
-        // ---------------------------------------------------------------------
+
+        // 1) Checkout -------------------------------------------------------
         stage('Checkout') {
             steps {
-                echo '📥  Checking out source code…'
+                echo '📥  Checkout source…'
                 checkout scm
             }
         }
 
-        // ---------------------------------------------------------------------
+        // 2) Build & Test ---------------------------------------------------
         stage('Build & Test') {
             steps {
-                echo '🔨  Building application & running tests…'
+                echo '🔨  Gradle build + test…'
                 script {
                     sh 'chmod +x ./gradlew'
-                    sh './gradlew clean build'    // JAR di build/libs/…
+                    sh './gradlew clean build'
                 }
             }
         }
 
-        // ---------------------------------------------------------------------
+        // 3) BuildConfig / ImageStream / Build ------------------------------
         stage('Build with OpenShift BuildConfig') {
             steps {
                 script {
-                    echo "🚀  Triggering OpenShift build for ${APP_NAME}:${SEMANTIC_VERSION}"
+                    echo "🚀  Trigger build for ${APP_NAME}:${SEMANTIC_VERSION}"
 
                     sh """
-                        # Berpindah project
                         oc project ${NAMESPACE}
 
-                        ################################################################
-                        # 1) Buat / update BuildConfig
-                        ################################################################
+                        # BuildConfig -------------------------------------------------
                         oc apply -f - <<EOF
 apiVersion: build.openshift.io/v1
 kind: BuildConfig
 metadata:
   name: ${APP_NAME}
-  namespace: ${NAMESPACE}
-  labels:
-    app: ${APP_NAME}
+  labels: { app: ${APP_NAME} }
 spec:
-  source:
-    type: Binary                          # kita upload konteks repo (Dockerfile + JAR)
+  source: { type: Binary }                 # binary build
   strategy:
     type: Docker
-    dockerStrategy:
-      dockerfilePath: Dockerfile
+    dockerStrategy: { dockerfilePath: Dockerfile }
   output:
-    to:
-      kind: ImageStreamTag
-      name: ${APP_NAME}:latest
-  triggers:                               # manual trigger saja
-  - type: Manual
-  runPolicy: Serial
+    to: { kind: ImageStreamTag, name: ${APP_NAME}:latest }
+  triggers: [ { type: Manual } ]
 EOF
 
-                        ################################################################
-                        # 2) Buat / update ImageStream
-                        ################################################################
+                        # ImageStream -----------------------------------------------
                         oc apply -f - <<EOF
 apiVersion: image.openshift.io/v1
 kind: ImageStream
 metadata:
   name: ${APP_NAME}
-  namespace: ${NAMESPACE}
-  labels:
-    app: ${APP_NAME}
-spec:
-  lookupPolicy:
-    local: false
+  labels: { app: ${APP_NAME} }
+spec: { lookupPolicy: { local: false } }
 EOF
 
-                        ################################################################
-                        # 3) Start build: upload seluruh repo sebagai binary input
-                        ################################################################
-                        echo "⏳  Starting OpenShift build…"
+                        # Start build ----------------------------------------------
+                        echo '⏳  oc start-build …'
                         oc start-build ${APP_NAME} --from-dir=. --wait --follow | cat
 
-                        ################################################################
-                        # 4) Tag hasil build dengan semantic version
-                        ################################################################
+                        # Tag semver -----------------------------------------------
                         oc tag ${APP_NAME}:latest ${APP_NAME}:${SEMANTIC_VERSION}
-
-                        echo "✅  Build completed -> tags: latest & ${SEMANTIC_VERSION}"
+                        echo '✅  Build finished.'
                     """
                 }
             }
         }
 
-        // ---------------------------------------------------------------------
+        // 4) Apply manifests (inline) --------------------------------------
         stage('Apply OpenShift Resources') {
             steps {
                 script {
-                    echo '📜  Applying resource manifests…'
+                    echo '📜  Applying inline manifests…'
                     sh """
                         oc project ${NAMESPACE}
 
-                        # Terapkan YAML di folder openshift/ (contoh: secrets, service, deployment)
-                        oc apply -f openshift/secrets.yaml
-                        oc apply -f openshift/service.yaml
-                        oc apply -f openshift/deployment.yaml
+                        # ---------- Secret ----------
+                        cat <<EOF | oc apply -f -
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ${APP_NAME}-secret
+  labels: { app: ${APP_NAME} }
+type: Opaque
+stringData:
+  DB_USERNAME: developer
+  DB_PASSWORD: developer123
+  DB_URL: jdbc:postgresql://one-gate-payment-db:5432/one_gate_payment
+  JWT_SECRET: changeme
+EOF
 
-                        echo '✅  Resources applied.'
+                        # ---------- Service ----------
+                        cat <<EOF | oc apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${APP_NAME}
+  labels: { app: ${APP_NAME} }
+spec:
+  selector: { app: ${APP_NAME} }
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP
+EOF
+
+                        # ---------- Deployment ----------
+                        cat <<EOF | oc apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${APP_NAME}
+  labels: { app: ${APP_NAME} }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: ${APP_NAME} } }
+  template:
+    metadata: { labels: { app: ${APP_NAME} } }
+    spec:
+      containers:
+        - name: ${APP_NAME}
+          image: ${REGISTRY}/${NAMESPACE}/${APP_NAME}:latest
+          imagePullPolicy: IfNotPresent
+          ports: [ { containerPort: 8080 } ]
+          env:
+            - { name: DB_USERNAME, valueFrom: { secretKeyRef: { name: ${APP_NAME}-secret, key: DB_USERNAME } } }
+            - { name: DB_PASSWORD, valueFrom: { secretKeyRef: { name: ${APP_NAME}-secret, key: DB_PASSWORD } } }
+            - { name: DB_URL,     valueFrom: { secretKeyRef: { name: ${APP_NAME}-secret, key: DB_URL } } }
+            - { name: JWT_SECRET, valueFrom: { secretKeyRef: { name: ${APP_NAME}-secret, key: JWT_SECRET } } }
+          readinessProbe:
+            httpGet: { path: /actuator/health, port: 8080 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /actuator/health, port: 8080 }
+            initialDelaySeconds: 30
+            periodSeconds: 10
+EOF
+                        echo '✅  Manifests applied.'
                     """
                 }
             }
         }
 
-        // ---------------------------------------------------------------------
+        // 5) Deploy ---------------------------------------------------------
         stage('Deploy Application') {
             steps {
                 script {
-                    echo "🚢  Deploying ${APP_NAME} image…"
-
+                    echo "🚢  Rollout ${APP_NAME}…"
                     sh """
                         oc project ${NAMESPACE}
 
-                        # Ganti image container pada Deployment ke tag 'latest'
-                        oc set image deployment/${APP_NAME} ${APP_NAME}=${REGISTRY}/${NAMESPACE}/${APP_NAME}:latest -n ${NAMESPACE}
+                        # Set image => tag 'latest'
+                        oc set image deployment/${APP_NAME} ${APP_NAME}=${REGISTRY}/${NAMESPACE}/${APP_NAME}:latest
 
-                        # Restart (rollout) deployment supaya pod baru tarik image
-                        oc rollout restart deployment/${APP_NAME} -n ${NAMESPACE}
+                        # Restart rollout & wait
+                        oc rollout restart deployment/${APP_NAME}
+                        oc rollout status deployment/${APP_NAME} --timeout=300s | cat
 
-                        # Tunggu rollout selesai (max 5 menit)
-                        oc rollout status deployment/${APP_NAME} -n ${NAMESPACE} --timeout=300s | cat
-
-                        # Tampilkan status pod & image
+                        # Info
+                        oc get pods -l app=${APP_NAME}
+                        oc get deployment ${APP_NAME} -o jsonpath='{.spec.template.spec.containers[0].image}'
                         echo ''
-                        oc get pods -l app=${APP_NAME} -n ${NAMESPACE}
-                        echo ''
-                        echo 'Current deployment image:'
-                        oc get deployment ${APP_NAME} -o jsonpath='{.spec.template.spec.containers[0].image}' -n ${NAMESPACE}
-                        echo ''
-                        echo '✅  Deployed tags: latest & ${SEMANTIC_VERSION}'
-                        echo '🔍  ImageStream tags available:'
-                        oc get imagestream ${APP_NAME} -o jsonpath='{.status.tags[*].tag}' -n ${NAMESPACE} | tr ' ' '\\n'
                     """
                 }
             }
         }
     }
 
-    /*--- POST ----------------------------------------------------------------*/
+    /* POST ----------------------------------------------------------------- */
     post {
         success {
             echo """
-🎉  Pipeline SUCCESS
-    • Image tags  : latest, ${SEMANTIC_VERSION}
-    • Namespace   : ${NAMESPACE}
-    • Deployment  : ${APP_NAME}
-
-Untuk port‑forward lokal:
-    oc port-forward svc/${APP_NAME} 8080:8080 -n ${NAMESPACE}
-"""
+🎉  SUCCESS – deployed ${APP_NAME}
+Tags: latest, ${SEMANTIC_VERSION}
+Namespace: ${NAMESPACE}
+            """
         }
         failure {
             script {
-                echo '❌  Pipeline FAILED  lihat log di atas.'
-                // try dumping last build logs (abaikan error jika tidak ada build)
+                echo '❌  Pipeline FAILED.'
                 sh """
-                    echo '─── Recent Build Logs (if any) ───'
+                    echo '── Build logs (last 50 lines) ──'
                     oc logs -l build=${APP_NAME} --tail=50 -n ${NAMESPACE} || true
                 """
             }

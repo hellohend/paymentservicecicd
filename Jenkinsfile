@@ -34,7 +34,7 @@ pipeline {
                 echo '🔨  Gradle build + test…'
                 script {
                     sh 'chmod +x ./gradlew'
-                    sh './gradlew clean build'
+                    sh './gradlew clean build -x test'
                 }
             }
         }

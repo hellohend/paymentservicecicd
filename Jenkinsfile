@@ -12,14 +12,14 @@ pipeline {
     /* ENV ------------------------------------------------------------------ */
     environment {
         NAMESPACE         = 'payment-service1'
-        APP_NAME          = 'payment-service'
-        REGISTRY          = 'image-registry.openshift-image-registry.svc:5000'
-        SEMANTIC_VERSION  = "${params.SEMANTIC_VERSION ?: env.BUILD_NUMBER}"
+        APP_NAME         = 'payment-service'
+        REGISTRY         = 'image-registry.openshift-image-registry.svc:5000'
+        SEMANTIC_VERSION = "${params.SEMANTIC_VERSION ?: env.BUILD_NUMBER}"
+        AUTH_SERVICE_URL = 'http://authentication-service:8080'
     }
 
     /* STAGES --------------------------------------------------------------- */
     stages {
-
         // 1) Checkout -------------------------------------------------------
         stage('Checkout') {
             steps {
@@ -54,9 +54,12 @@ apiVersion: build.openshift.io/v1
 kind: BuildConfig
 metadata:
   name: ${APP_NAME}
-  labels: { app: ${APP_NAME} }
+  labels: { 
+    app: ${APP_NAME},
+    version: "1.0.0"
+  }
 spec:
-  source: { type: Binary }                 # binary build
+  source: { type: Binary }
   strategy:
     type: Docker
     dockerStrategy: { dockerfilePath: Dockerfile }
@@ -71,7 +74,10 @@ apiVersion: image.openshift.io/v1
 kind: ImageStream
 metadata:
   name: ${APP_NAME}
-  labels: { app: ${APP_NAME} }
+  labels: { 
+    app: ${APP_NAME},
+    version: "1.0.0"
+  }
 spec: { lookupPolicy: { local: false } }
 EOF
 
@@ -101,13 +107,17 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: ${APP_NAME}-secret
-  labels: { app: ${APP_NAME} }
+  labels: { 
+    app: ${APP_NAME},
+    version: "1.0.0"
+  }
 type: Opaque
 stringData:
   DB_USERNAME: developer
   DB_PASSWORD: developer123
   DB_URL: jdbc:postgresql://one-gate-payment-db:5432/one_gate_payment
   JWT_SECRET: changeme
+  AUTH_SERVICE_KEY: your-auth-service-key-here
 EOF
 
                         # ---------- Service ----------
@@ -116,7 +126,10 @@ apiVersion: v1
 kind: Service
 metadata:
   name: ${APP_NAME}
-  labels: { app: ${APP_NAME} }
+  labels: { 
+    app: ${APP_NAME},
+    version: "1.0.0"
+  }
 spec:
   selector: { app: ${APP_NAME} }
   ports:
@@ -132,31 +145,50 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ${APP_NAME}
-  labels: { app: ${APP_NAME} }
+  labels: { 
+    app: ${APP_NAME},
+    version: "1.0.0"
+  }
 spec:
   replicas: 2
   selector: { matchLabels: { app: ${APP_NAME} } }
   template:
-    metadata: { labels: { app: ${APP_NAME} } }
+    metadata: { 
+      labels: { 
+        app: ${APP_NAME},
+        version: "1.0.0"
+      } 
+    }
     spec:
       containers:
         - name: ${APP_NAME}
           image: ${REGISTRY}/${NAMESPACE}/${APP_NAME}:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           ports: [ { containerPort: 8080 } ]
           env:
             - { name: DB_USERNAME, valueFrom: { secretKeyRef: { name: ${APP_NAME}-secret, key: DB_USERNAME } } }
             - { name: DB_PASSWORD, valueFrom: { secretKeyRef: { name: ${APP_NAME}-secret, key: DB_PASSWORD } } }
             - { name: DB_URL,     valueFrom: { secretKeyRef: { name: ${APP_NAME}-secret, key: DB_URL } } }
             - { name: JWT_SECRET, valueFrom: { secretKeyRef: { name: ${APP_NAME}-secret, key: JWT_SECRET } } }
+            - { name: AUTH_SERVICE_URL, value: "\${AUTH_SERVICE_URL}" }
+            - { name: AUTH_SERVICE_KEY, valueFrom: { secretKeyRef: { name: ${APP_NAME}-secret, key: AUTH_SERVICE_KEY } } }
           readinessProbe:
-            httpGet: { path: /actuator/health, port: 8080 }
-            initialDelaySeconds: 10
-            periodSeconds: 10
-          livenessProbe:
             httpGet: { path: /actuator/health, port: 8080 }
             initialDelaySeconds: 30
             periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet: { path: /actuator/health, port: 8080 }
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
 EOF
                         echo '✅  Manifests applied.'
                     """
@@ -193,7 +225,7 @@ EOF
     post {
         success {
             echo """
-🎉  SUCCESS – deployed ${APP_NAME}
+🎉  SUCCESS  deployed ${APP_NAME}
 Tags: latest, ${SEMANTIC_VERSION}
 Namespace: ${NAMESPACE}
             """
